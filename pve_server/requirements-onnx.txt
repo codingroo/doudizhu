@@ -1,0 +1,7 @@
+# Minimal dependencies for running pve_server/run_douzero.py with the pre-trained
+# ONNX models (landlord.onnx, landlord_up.onnx, landlord_down.onnx).
+# PyTorch is NOT needed in this mode.
+flask
+flask-cors
+numpy
+onnxruntime

@@ -23,7 +23,7 @@
     }
 
     .played-card-area {
-        font-size: 12px;
+        font-size: var(--dz-played-size, 12px); // the cards you have played (--dz-ai-played-size: the AI players)
         width: 300px;
         display: flex;
         justify-content: center;
@@ -42,6 +42,27 @@
         .main-player-action-wrapper {
             display: flex;
             align-items: center;
+            position: relative;
+            min-height: 60px; // as high as the stopwatch, so that the bid buttons and the play buttons are at the same height
+            // the row of buttons (bidding and playing) is half a button (22px) higher, so that a card that pops up when it is
+            // selected does not hide part of the buttons
+            top: -22px;
+
+            // "直接认输": at the right end of the bid row, 30px away from the last bid button
+            .concede-button {
+                position: absolute;
+                left: 100%;
+                top: 50%;
+                margin-left: 30px;
+                transform: translateY(-50%);
+                min-width: 0;
+                padding: 6px 12px;
+                line-height: 1.4;
+                font-size: 14px;
+                font-weight: normal;
+                border-radius: 4px;
+                white-space: nowrap;
+            }
             
             button {
                 font-weight: bolder;
@@ -55,18 +76,78 @@
             opacity: 1;
             width: 51px;
             height: 60px;
-            .timer-text {
-                color: #303133;
-                transform: translateY(5px);
-                font-size: 23px;
-                font-weight: bold;
-                text-shadow: 0 2px 2px #909399;
-                line-height: 55px;
+            // the hourglass is level with the buttons
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            .hourglass {
+                width: 32px; // 80% of the original 40 x 56
+                height: 44.8px;
+                transform-origin: 50% 50%;
+                will-change: transform;
+                // One run of the animation is TWO turns (two periods): 0 -> 180 degrees, then 180 -> 360 degrees. At the end
+                // of a run the glass is at 360 degrees with the first layer of sand, exactly as at the start, so that the
+                // jump back to the start changes nothing on the screen. (Before, the run was one turn with a jump from 180 to 0
+                // degrees together with the exchange of the sand layers; the turning runs on the graphics processor and the sand
+                // on the main thread, on a phone they were not always exactly together and the wrong sand flashed for a moment.)
+                animation: hourglass-flip calc(2 * var(--dz-hourglass-period, 4s)) ease-in-out infinite;
+
+                // the two layers of sand are exchanged when a turn has reached 170 degrees (a turn takes 15% of the run, and
+                // with the ease-in-out the 170 degrees come at 83.4% of it: 35% + 12.5% = 47.5%, and 85% + 12.5% = 97.5%)
+                .hg-sand-a {
+                    animation: hourglass-sand-a calc(2 * var(--dz-hourglass-period, 4s)) linear infinite;
+                }
+
+                .hg-sand-b {
+                    animation: hourglass-sand-b calc(2 * var(--dz-hourglass-period, 4s)) linear infinite;
+                }
             }
-            text-align: center;
-            background-image: url("./images/timer.png");
-            background-repeat: no-repeat;
-            background-size: 100% 100%;
+        }
+
+        @keyframes hourglass-sand-a {
+            0%,
+            47.4% {
+                opacity: 1;
+            }
+            47.6%,
+            97.4% {
+                opacity: 0;
+            }
+            97.6%,
+            100% {
+                opacity: 1;
+            }
+        }
+
+        @keyframes hourglass-sand-b {
+            0%,
+            47.4% {
+                opacity: 0;
+            }
+            47.6%,
+            97.4% {
+                opacity: 1;
+            }
+            97.6%,
+            100% {
+                opacity: 0;
+            }
+        }
+
+        @keyframes hourglass-flip {
+            0%,
+            35% {
+                transform: rotate(0deg);
+            }
+            50%,
+            85% {
+                transform: rotate(180deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
         }
 
         .non-card {
@@ -82,6 +163,12 @@
                 font-weight: bold;
                 text-shadow: 0 2px 2px rgba(0, 0, 0, 0.87);
                 color: #F2F6FC;
+            }
+
+            // the points called by a player: the font of the numbers on the bid buttons (Material-UI buttons)
+            &.bid-result span {
+                font-family: 'Roboto', 'Helvetica', 'Arial', sans-serif;
+                font-weight: bold;
             }
         }
     }
@@ -115,28 +202,112 @@
         background-color: initial;
     }
 
-    #left-player {
+    // The names of the three players: plain text (colour: --dz-nick-color in public/custom.css) instead of the blue chip.
+    .player-nick {
+        color: var(--dz-nick-color, #f3efe0);
+        font-size: 20px; // a bit smaller than the line "底分 xx" (24px)
+        line-height: 24px;
+        height: 24px;
+        width: max-content;
+        max-width: 220px;
+        position: relative;
+        left: 50%;
+        transform: translateX(-50%);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+    }
+
+    .player-score {
+        color: var(--dz-score-color, #ffd666);
+        font-family: 'Roboto', 'Helvetica', 'Arial', sans-serif; // the font of the numbers on the bid buttons
+        font-weight: bold;
+        font-size: 20px; // the same size as the name
+        line-height: 24px;
+        height: 24px;
+        text-align: center;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+    }
+
+    // Your own portrait: its lower edge is level with the middle of your hand, the button "修改昵称" is above it,
+    // your name and your score are below it. The 91px circle is in the same column as the portrait of the left AI.
+    .player-info-you {
         position: absolute;
-        left: 10px;
-        top: 10px;
+        left: calc(10px + var(--dz-ai-shift, 6%) + 19.5px);
+        top: -23px;
+        // the portrait with its button, name and score move together: --dz-you-x / --dz-you-y in public/custom.css
+        transform: translate(var(--dz-you-x, 0px), var(--dz-you-y, 0px));
+        width: 91px;
+        height: 91px;
+
+        img {
+            display: block;
+            width: 91px;
+            height: 91px;
+            margin: 0;
+        }
+
+        .player-nick,
+        .player-score {
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            width: max-content;
+            max-width: 110px; // longer names are cut with ...
+            z-index: 6;
+        }
+
+        // 3.7px lower than the portrait: the AI portraits are inline images and have this gap below them
+        .player-nick {
+            top: 94.7px;
+        }
+
+        .player-score {
+            top: 118.7px;
+        }
+
+        .change-nickname-button {
+            position: absolute;
+            left: 50%;
+            bottom: 100%;
+            transform: translateX(-50%);
+            margin-bottom: 4px;
+            z-index: 6; // above the (transparent) box of the hand
+            min-width: 0;
+            padding: 1px 10px;
+            font-size: 13px;
+            line-height: 1.5;
+            white-space: nowrap;
+            color: var(--dz-nick-color, #f3efe0);
+            border-color: rgba(243, 239, 224, 0.6);
+        }
+    }
+
+    // Settings in public/custom.css: --dz-ai-hand-step (gap between hidden cards), --dz-played-step (gap between
+    // played cards) and --dz-ai-shift (how far the AI seats are moved from the table edge towards the middle).
+    #left-player,
+    #right-player {
+        --dz-ai-hand-width: calc(var(--dz-ai-hand-step, 18px) * 9 + 5.2 * 10px + 2px);
 
         .player-main-area {
-            width: 300px;
+            width: calc(150px + var(--dz-ai-hand-width));
             height: 130px;
             font-size: 10px;
+            position: relative;
+
+            .player-hand-up,
+            .player-hand-down {
+                position: absolute;
+                width: var(--dz-ai-hand-width);
+            }
 
             .player-hand-up {
-                position: absolute;
                 top: 0;
-                margin-left: 150px;
-                width: 150px;
             }
 
             .player-hand-down {
-                position: absolute;
                 top: 50px;
-                margin-left: 150px;
-                width: 150px;
             }
 
             .player-hand-placeholder {
@@ -144,47 +315,49 @@
                 height: 130px;
                 position: absolute;
                 top: 0;
-                margin-left: 130px;
             }
         }
 
         .played-card-area {
             position: relative;
-            left: 20px;
             top: 20px;
+            width: var(--dz-ai-hand-width);
+        }
+    }
+
+    #left-player .played-card-area,
+    #right-player .played-card-area {
+        font-size: var(--dz-ai-played-size, 12px);
+    }
+
+    #left-player {
+        position: absolute;
+        left: calc(10px + var(--dz-ai-shift, 6%));
+        top: 10px;
+
+        .player-main-area {
+            .player-hand-up,
+            .player-hand-down,
+            .player-hand-placeholder {
+                left: 150px;
+            }
+        }
+
+        .played-card-area {
+            margin-left: 150px;
         }
     }
 
     #right-player {
         position: absolute;
-        right: 10px;
+        right: calc(10px + var(--dz-ai-shift, 6%));
         top: 10px;
 
         .player-main-area {
-            width: 300px;
-            height: 130px;
-            font-size: 10px;
-
-            .player-hand-up {
-                position: absolute;
-                top: 0;
-                margin-right: 150px;
-                width: 150px;
-            }
-
-            .player-hand-down {
-                position: absolute;
-                top: 50px;
-                margin-right: 150px;
-                width: 150px;
-            }
-
+            .player-hand-up,
+            .player-hand-down,
             .player-hand-placeholder {
-                width: 150px;
-                height: 130px;
-                position: absolute;
-                top: 0;
-                margin-right: 130px;
+                right: 150px;
             }
 
             .player-info {
@@ -193,30 +366,35 @@
         }
 
         .played-card-area {
-            position: relative;
-            right: 20px;
-            top: 20px;
+            margin-left: auto;
+            margin-right: 150px;
         }
     }
 
     #bottom-player {
         position: absolute;
         bottom: 10px;
-        left: 50%;
-        margin-left: -290px;
+        left: 0;
+        right: 0;
+
+        // The hand is centred on the pass button (see .player-hand below); the step between cards is --dz-hand-step
+        // in public/custom.css. Your portrait is not tied to the hand any more (see .player-info-you).
 
         .player-main-area {
-            width: 580px;
+            width: 100%;
             height: 130px;
             position: relative;
 
             .player-hand {
                 position: absolute;
-                top: 0;
-                padding-left: 20px;
-                margin-left: 130px;
-                width: 450px;
-                font-size: 14px;
+                top: -16px; // the bigger cards would otherwise stick out of the bottom edge of the table
+                // The hand is centred on the middle of the 不出 (pass) button, not on the table: with the timer in front
+                // of the three equal buttons, that middle is 37.5px to the right of the middle of the table.
+                left: calc(4.5% + 75px + var(--dz-hand-shift, 0px));
+                right: calc(4.5% - var(--dz-hand-shift, 0px)); // both edges move: the hand is shifted as a whole
+                display: flex;
+                justify-content: center;
+                font-size: var(--dz-hand-size, 21px); // the size of your cards (everything on a card scales with it)
             }
 
             .player-hand-placeholder {
@@ -230,7 +408,8 @@
         }
 
         .played-card-area {
-            width: 100%;
+            width: calc(150px + var(--dz-hand-step, 40px) * 19 + 5.2 * var(--dz-hand-size, 21px) + 2px);
+            margin: 0 auto;
             position: relative;
             transform: translateY(-10px);
 
@@ -258,4 +437,74 @@
             font-weight: bolder;
         }
     }
+}
+// win-rate table in the result window: one line per cell, compact rows; the window grows sideways instead
+.doudizhu-statistic-table {
+    .MuiTableCell-root {
+        white-space: nowrap;
+        padding: 5px 14px;
+    }
+}
+
+// The landlord's portrait: when the landlord is decided it pops out three times and gets a steady golden ring. Both
+// start only when the picture itself has been loaded (the class "loaded" is set in DoudizhuGameBoard.js), so that a late
+// picture never leaves a bare ring on the table. Only transform is animated (cheap: no repainting).
+// public/custom.css: --dz-landlord-glow = colour of the ring.
+.landlord-wrap {
+    position: relative;
+    display: inline-block;
+    width: 70%;
+    height: 70%;
+
+    img {
+        display: block;
+        width: 100%;
+        height: 100%;
+    }
+
+    &::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        border-radius: 50%;
+        pointer-events: none;
+        box-shadow: 0 0 2px 1px var(--dz-landlord-glow, #ffd34d), 0 0 7px 3px var(--dz-landlord-glow, #ffd34d);
+        opacity: 0;
+    }
+
+    &.loaded {
+        animation: landlord-pop 0.7s ease-in-out 3;
+
+        &::after {
+            opacity: 0.8;
+        }
+    }
+}
+
+.player-info-you .landlord-wrap {
+    display: block;
+    width: 91px;
+    height: 91px;
+}
+
+@keyframes landlord-pop {
+    0%,
+    100% {
+        transform: scale(1);
+    }
+    40% {
+        transform: scale(1.18);
+    }
+}
+
+// The play button while the selection is not a legal play: it looks exactly like a disabled button (the standard
+// Material-UI look), but it can still be clicked (it then shows the message).
+.MuiButton-root.dz-inactive,
+.MuiButton-root.dz-inactive:hover {
+    color: rgba(0, 0, 0, 0.26);
+    background-color: rgba(0, 0, 0, 0.12);
+    box-shadow: none;
 }

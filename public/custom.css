@@ -1,0 +1,51 @@
+/*
+  Settings you can change by editing this file (no rebuild needed).
+  After saving, reload the page with Ctrl+F5.
+*/
+:root {
+    /* distance between the left edges of neighbouring cards in your hand, in px.
+       The hand is always centred on the table. The portrait is fixed to the left of a full 20-card hand,
+       so a larger step pushes the portrait further left (about 30px or less keeps it on the table);
+       a smaller step packs the cards tighter. */
+    --dz-hand-step: 45px;
+
+    /* moves your whole hand to the right (px), away from the portrait; 0 = centred on the pass button; 60px clears the portrait and the name, and a 20-card hand just fits the table */
+    --dz-hand-shift: 40px;
+
+    /* size of your cards (14px was the original size; everything on a card, and the gap, scales with it).
+       With 21px (1.5 times) a full 20-card hand reaches the left edge of the table, so the step is 40px;
+       with a bigger size lower the step, with a smaller size you can raise it. */
+    --dz-hand-size: 20px;
+
+    /* size of the cards that have been played: yours, and those of the two AI players
+       (12px = the original size; the gap between them is --dz-played-step below) */
+    --dz-played-size: 15px;
+    --dz-ai-played-size: 15px;
+
+    /* the two AI players: gap between their hidden cards, gap between the cards they have played, and how far
+       their seats are moved from the edge of the table towards the middle (a percentage of the table width) */
+    --dz-ai-hand-step: 18px;
+    --dz-played-step: 25px;
+    --dz-ai-shift: 6%;
+
+    /* top edge of the result window, in px below the top edge of the table (the "Base X" line is at about
+       40px, the green area starts at about 190px). Bigger numbers move the window down. */
+    --dz-dialog-top: 100px;
+
+    /* colour of the three player names (and of the "Edit Nickname" button) on the table */
+    --dz-nick-color: #f3efe0;
+
+    /* colour of the glow around the portrait of the landlord */
+    --dz-landlord-glow: #ffd34d;
+
+    /* the hourglass that shows the game is running: time for one turn-over */
+    --dz-hourglass-period: 4s;
+
+    /* colour of the scores under the names */
+    --dz-score-color: #ffd666;
+
+    /* your portrait together with its button, name and score: offset from the default place, in px.
+       x: positive = right, negative = left;  y: positive = down, negative = up */
+    --dz-you-x: -20px;
+    --dz-you-y: 10px;
+}

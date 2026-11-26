@@ -10,6 +10,7 @@ import FormGroup from '@material-ui/core/FormGroup';
 import Paper from '@material-ui/core/Paper';
 import Slider from '@material-ui/core/Slider';
 import Switch from '@material-ui/core/Switch';
+import TextField from '@material-ui/core/TextField';
 import NotInterestedIcon from '@material-ui/icons/NotInterested';
 import TranslateIcon from '@material-ui/icons/Translate';
 import axios from 'axios';
@@ -30,30 +31,139 @@ import {
     translateCardData,
 } from '../../utils';
 import { douzeroDemoUrl } from '../../utils/config';
+import { currentMultiplier, settle } from '../../utils/doudizhuScore';
+import { pickPhrase } from '../../utils/doudizhuPhrase';
+import { aiBid, applyBid, createBidState, landlordIdxToRole } from '../../utils/doudizhuBid';
 
-let shuffledDoudizhuDeck = shuffleArray(fullDoudizhuDeck.slice());
-
-let threeLandlordCards = shuffleArray(sortDoudizhuCards(shuffledDoudizhuDeck.slice(0, 3)));
-let originalThreeLandlordCards = threeLandlordCards.slice();
-
+let shuffledDoudizhuDeck = [];
+let threeLandlordCards = [];
+let originalThreeLandlordCards = [];
 const initConsiderationTime = 30000;
 const considerationTimeDeduction = 1000;
 const mainPlayerId = 0; // index of main player (for the sake of simplify code logic)
 let playerInfo = [];
+let initHands = [[], [], []];
+let firstBidder = 0; // who bids first in this deal
+// A short code of the cards of this deal (8 hex digits, a hash of the three hands and the three bottom cards), written to
+// play.log with the result: two games with the same code were played with the same cards. It is also in the result
+// window, in the colour of the background (select it with the mouse to see it).
+let dealId = '';
+const computeDealId = () => {
+    const text = [initHands[0], initHands[1], initHands[2], originalThreeLandlordCards]
+        .map((cards) => cards.slice().sort().join(''))
+        .join('|');
+    let h = 0x811c9dc5; // FNV-1a, 32 bit
+    for (let i = 0; i < text.length; i++) {
+        h ^= text.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return ('00000000' + h.toString(16)).slice(-8);
+};
 
-let initHands = [
-    shuffledDoudizhuDeck.slice(3, 20),
-    shuffledDoudizhuDeck.slice(20, 37),
-    shuffledDoudizhuDeck.slice(37, 54),
-];
+// Deal snapshot: F5 restores the same deal (the bidding starts again), a new tab / a closed tab starts a new deal.
+// Kept in sessionStorage, removed when the game ends or when the player concedes. Raise the version when the layout changes.
+const SNAPSHOT_KEY = 'DOUDIZHU_DEAL_SNAPSHOT';
+const SNAPSHOT_VERSION = 1;
+const saveSnapshot = () => {
+    try {
+        sessionStorage.setItem(
+            SNAPSHOT_KEY,
+            JSON.stringify({
+                version: SNAPSHOT_VERSION,
+                hands: initHands,
+                three: originalThreeLandlordCards,
+                firstBidder,
+                savedAt: Date.now(),
+            }),
+        );
+    } catch (e) {
+        // storage not available: the game still works, only F5 gives a new deal
+    }
+};
+const clearSnapshot = () => {
+    try {
+        sessionStorage.removeItem(SNAPSHOT_KEY);
+    } catch (e) {
+        // ignore
+    }
+};
+const loadSnapshot = () => {
+    try {
+        const raw = sessionStorage.getItem(SNAPSHOT_KEY);
+        if (!raw) return false;
+        const snap = JSON.parse(raw);
+        if (!snap || snap.version !== SNAPSHOT_VERSION) return false;
+        // a deal older than this is not restored (public/settings.js: dealKeepMinutes, 10 by default), so a page that
+        // was left alone for a while starts with a new deal
+        const settings = window.DOUDIZHU_SETTINGS || {};
+        const keepMinutes = typeof settings.dealKeepMinutes === 'number' ? settings.dealKeepMinutes : 10;
+        const age = Date.now() - snap.savedAt;
+        if (typeof snap.savedAt !== 'number' || age < 0 || age > keepMinutes * 60 * 1000) return false;
+        const all = [].concat(snap.hands[0], snap.hands[1], snap.hands[2], snap.three);
+        const valid =
+            snap.hands.length === 3 &&
+            snap.hands.every((h) => Array.isArray(h) && h.length === 17) &&
+            snap.three.length === 3 &&
+            all.length === 54 &&
+            new Set(all).size === 54 &&
+            all.every((c) => fullDoudizhuDeck.indexOf(c) >= 0) &&
+            [0, 1, 2].indexOf(snap.firstBidder) >= 0;
+        if (!valid) return false;
+        initHands = snap.hands;
+        threeLandlordCards = snap.three.slice();
+        originalThreeLandlordCards = snap.three.slice();
+        firstBidder = snap.firstBidder;
+        dealId = computeDealId();
+        return true;
+    } catch (e) {
+        return false;
+    }
+};
+
+// shuffle and deal a new game (also used when all three players pass during bidding)
+const dealNewGame = () => {
+    shuffledDoudizhuDeck = shuffleArray(fullDoudizhuDeck.slice());
+
+    threeLandlordCards = shuffleArray(sortDoudizhuCards(shuffledDoudizhuDeck.slice(0, 3)));
+    originalThreeLandlordCards = threeLandlordCards.slice();
+
+    initHands = [
+        shuffledDoudizhuDeck.slice(3, 20),
+        shuffledDoudizhuDeck.slice(20, 37),
+        shuffledDoudizhuDeck.slice(37, 54),
+    ];
+    firstBidder = Math.floor(Math.random() * 3);
+    dealId = computeDealId();
+    saveSnapshot();
+};
+
+if (!loadSnapshot()) dealNewGame();
+
+// bumped when a game is abandoned (concede / new game): answers of the AI that are still on their way are dropped
+let gameToken = 0;
 
 console.log('init hands', initHands);
 console.log('three landlord card', threeLandlordCards);
+
+// settings that can be changed in public/settings.js without rebuilding the page
+const getSetting = (name, fallback) => {
+    const settings = window.DOUDIZHU_SETTINGS || {};
+    return settings[name] === undefined ? fallback : settings[name];
+};
 
 let gameStateTimeout = null;
 
 let gameHistory = [];
 let bombNum = 0;
+let bombCounts = [0, 0, 0]; // how many bombs / rockets each seat has played, for the result comment
+let playCounts = [0, 0, 0]; // how many times each seat has played cards (passes excluded), for spring detection
+let finalBid = { landlordIdx: -1, points: 0 };
+let playerNames = ['You', 'AI-R', 'AI-L']; // replaced by the names sent by the backend (your nickname and the AI names)
+// the ID of this browser's player, made by the backend the first time and kept in localStorage; the scores are kept
+// per ID, so that friends who play on the same server have their own scores
+const PLAYER_ID_KEY = 'DOUDIZHU_PLAYER_ID';
+let myPlayerId = '';
+const NICKNAME_MAX = 8;
 let lastMoveLandlord = [];
 let lastMoveLandlordDown = [];
 let lastMoveLandlordUp = [];
@@ -62,16 +172,22 @@ let playedCardsLandlordDown = [];
 let playedCardsLandlordUp = [];
 let legalActions = { turn: -1, actions: [] };
 let hintIdx = -1;
+let hintBest = { turn: -2, token: -1, action: '' }; // the answer of the model for the hint in this turn
 let gameEndDialogTitle = '';
-let syncGameStatus = localStorage.getItem('LOCALE') ? 'ready' : 'localeSelection';
+let resultPhrase = null; // comment for the result window, from public/phrases.js
+let syncGameStatus = 'ready';
 
 function PvEDoudizhuDemoView() {
     const { t, i18n } = useTranslation();
-    const [apiPlayDelay, setApiPlayDelay] = useState(3000);
+    // initial value of the "AI thinking time" slider; must be one of the slider's steps (see public/settings.js)
+    const [apiPlayDelay, setApiPlayDelay] = useState(() => {
+        const wanted = getSetting('aiThinkingTimeMs', 0);
+        return [0, 1000, 3000, 5000, 10000, 30000].indexOf(wanted) >= 0 ? wanted : 3000;
+    });
     const [isGameEndDialogOpen, setIsGameEndDialogOpen] = useState(false);
     const [considerationTime, setConsiderationTime] = useState(initConsiderationTime);
     const [toggleFade, setToggleFade] = useState('');
-    const [gameStatus, setGameStatus] = useState(localStorage.getItem('LOCALE') ? 'ready' : 'localeSelection'); // "localeSelection", "ready", "playing", "paused", "over"
+    const [gameStatus, setGameStatus] = useState('ready'); // "localeSelection", "ready", "bidding", "playing", "paused", "over"
     const [gameState, setGameState] = useState({
         hands: [[], [], []],
         latestAction: [[], [], []],
@@ -81,11 +197,23 @@ function PvEDoudizhuDemoView() {
     const [selectedCards, setSelectedCards] = useState([]); // user selected hand card
     const [isPassDisabled, setIsPassDisabled] = useState(true);
     const [isHintDisabled, setIsHintDisabled] = useState(true);
+    const [, setLegalVersion] = useState(0); // changed whenever a list of legal actions arrives (to redraw the play button)
     const [predictionRes, setPredictionRes] = useState({ prediction: [], hands: [] });
     const [hideRivalHand, setHideRivalHand] = useState(true);
     const [hidePredictionArea, setHidePredictionArea] = useState(true);
-    const [locale, setLocale] = useState(localStorage.getItem('LOCALE') || 'en');
+    const [locale, setLocale] = useState(localStorage.getItem('LOCALE') || 'zh');
     const [statisticRows, setStatisticRows] = useState([]);
+    const [bidState, setBidState] = useState(createBidState(null)); // state of the bidding phase
+    const [scoreData, setScoreData] = useState(null); // names and cumulative scores of this player, kept by the backend
+    const [nicknameDialog, setNicknameDialog] = useState({ open: false, required: false }); // required: first visit
+    const [nicknameInput, setNicknameInput] = useState('');
+    const [nickAnchor, setNickAnchor] = useState(null); // centre of the table, where the nickname window goes
+    const [isClearScoreDialogOpen, setIsClearScoreDialogOpen] = useState(false);
+    const [dialogAnchor, setDialogAnchor] = useState(null); // horizontal centre and top of the table, where the result window goes
+    const [settlement, setSettlement] = useState(null); // result of the game that has just ended
+    const [viewScale, setViewScale] = useState(1);
+    const [viewWidth, setViewWidth] = useState(1000);
+    const [isFullscreen, setIsFullscreen] = useState(false);
 
     const cardArr2DouzeroFormat = (cards) => {
         return cards
@@ -97,11 +225,21 @@ function PvEDoudizhuDemoView() {
             .join('');
     };
 
+    // Is this selection a legal play right now? It is the same test that the play button used to do at the click, with the
+    // list of legal actions of this turn that the backend sent (one lookup in a set: it costs next to nothing).
+    const isLegalSelection = (cards) => {
+        if (!cards || cards.length === 0) return false;
+        if (gameState.currentPlayer !== mainPlayerId || gameState.turn !== legalActions.turn) return false;
+        if (!legalActions.set) legalActions.set = new Set(legalActions.actions);
+        return legalActions.set.has(cardArr2DouzeroFormat(sortDoudizhuCards(cards, true)));
+    };
+
     function timeout(ms) {
         return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     const proceedNextTurn = async (playingCard, rankOnly = true) => {
+        const token = gameToken;
         // take played three landlord card out
         if (playerInfo[gameState.currentPlayer].role === 'landlord' && threeLandlordCards.length > 0) {
             let playingCardCopy;
@@ -135,12 +273,26 @@ function PvEDoudizhuDemoView() {
                 player_hand_cards,
                 rival_move,
             };
-            const apiRes = await axios.post(`${douzeroDemoUrl}/legal`, qs.stringify(requestBody));
+            let apiRes;
+            try {
+                apiRes = await axios.post(`${douzeroDemoUrl}/legal`, qs.stringify(requestBody));
+            } catch (err) {
+                if (token === gameToken) {
+                    Message({
+                        message: t('doudizhu.msg_network_error'),
+                        type: 'error',
+                        showClose: true,
+                    });
+                }
+                return;
+            }
+            if (token !== gameToken) return;
             const data = apiRes.data;
             legalActions = {
                 turn: gameState.turn + 1,
                 actions: data.legal_action.split(','),
             };
+            setLegalVersion((v) => v + 1);
             setIsHintDisabled(data.legal_action === '');
             setIsPassDisabled(playingCard.length === 0 && gameHistory[gameHistory.length - 1].length === 0);
         }
@@ -148,6 +300,7 @@ function PvEDoudizhuDemoView() {
         // delay play for api player
         if (gameState.currentPlayer !== mainPlayerId) {
             await timeout(apiPlayDelay);
+            if (token !== gameToken) return;
         }
 
         setToggleFade('fade-out');
@@ -207,7 +360,11 @@ function PvEDoudizhuDemoView() {
                 break;
         }
         gameHistory.push(newHistoryRecord);
-        if (isDoudizhuBomb(newHistoryRecord)) bombNum++;
+        if (isDoudizhuBomb(newHistoryRecord)) {
+            bombNum++;
+            bombCounts[gameState.currentPlayer]++;
+        }
+        if (newHistoryRecord.length > 0) playCounts[gameState.currentPlayer]++;
 
         newGameState.latestAction[gameState.currentPlayer] = newLatestAction;
         newGameState.hands[gameState.currentPlayer] = newHand;
@@ -270,16 +427,73 @@ function PvEDoudizhuDemoView() {
                     break;
                 default:
                     Message({
-                        message: 'Wrong douzero player position',
+                        message: t('doudizhu.msg_network_error'),
                         type: 'error',
                         showClose: true,
                     });
             }
             localStorage.setItem('GAME_STATISTICS', JSON.stringify(gameStatistics));
 
+            clearSnapshot();
+            // score settlement: base score x multiplier, saved by the backend so that it survives a restart
+            if (finalBid.landlordIdx >= 0) {
+                const result = settle({
+                    base: finalBid.points,
+                    landlordIdx: finalBid.landlordIdx,
+                    winnerIdx: gameState.currentPlayer,
+                    bombCount: bombNum,
+                    playCounts: playCounts.slice(),
+                });
+                setSettlement(result);
+                const winners = [0, 1, 2].map((i) => (i === result.landlordIdx) === result.landlordWon);
+                // the comment in the result window (rules: public/phrases.js); only for the Chinese interface
+                const youWon = winners[mainPlayerId];
+                resultPhrase = pickPhrase({
+                    win: youWon,
+                    lose: !youWon,
+                    landlord: result.landlordIdx === mainPlayerId,
+                    peasant: result.landlordIdx !== mainPlayerId,
+                    bomb: result.bombCount,
+                    self_bomb: bombCounts[mainPlayerId],
+                    other_bomb: result.bombCount - bombCounts[mainPlayerId],
+                    spring: result.spring,
+                    reverse_spring: result.antiSpring,
+                    hand_left: newGameState.hands[mainPlayerId].length,
+                    base: result.base,
+                    multiplier: result.multiplier,
+                });
+                axios
+                    .post(`${douzeroDemoUrl}/score/record`, {
+                        id: myPlayerId,
+                        deltas: result.deltas,
+                        winners,
+                        info: {
+                            base: result.base,
+                            multiplier: result.multiplier,
+                            bombs: result.bombCount,
+                            spring: result.spring,
+                            antiSpring: result.antiSpring,
+                            landlord: result.landlordIdx,
+                            deal: dealId,
+                        },
+                    })
+                    .then((res) => setScoreData(res.data))
+                    .catch(() =>
+                        Message({
+                            message: t('doudizhu.msg_network_error'),
+                            type: 'error',
+                            showClose: true,
+                        }),
+                    );
+            }
+
             setTimeout(() => {
                 gameEndDialogTitle =
-                    winner.role === 'peasant' ? t('doudizhu.peasants_win') : t('doudizhu.landlord_win');
+                    (i18n.language || '').startsWith('zh') && resultPhrase
+                        ? resultPhrase
+                        : winner.role === 'peasant'
+                        ? t('doudizhu.peasants_win')
+                        : t('doudizhu.landlord_win');
                 setStatisticRows([
                     {
                         role: t('doudizhu.landlord'),
@@ -318,8 +532,18 @@ function PvEDoudizhuDemoView() {
                     },
                 ]);
 
+                // put the result window over the right-hand panel, so that the table and the last cards stay visible
+                const table = document.querySelector('.doudizhu-gameboard-paper');
+                if (table) {
+                    const rect = table.getBoundingClientRect();
+                    // top edge of the result window: --dz-dialog-top (public/custom.css) below the top of the table
+                    let offset = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dz-dialog-top'));
+                    if (!(offset >= 0)) offset = 100;
+                    const zoom = parseFloat(document.querySelector('.doudizhu-view-container').style.zoom) || 1;
+                    setDialogAnchor({ x: rect.left + rect.width / 2, y: rect.top + offset * zoom });
+                } else setDialogAnchor(null);
                 setIsGameEndDialogOpen(true);
-            }, 2000);
+            }, getSetting('resultDelayMs', 100));
         } else {
             setConsiderationTime(initConsiderationTime);
             // manually trigger timer if consideration time equals initConsiderationTime
@@ -327,7 +551,8 @@ function PvEDoudizhuDemoView() {
         }
     };
 
-    const requestApiPlay = async () => {
+    // the request for the backend's /predict: the situation of the player whose turn it is (the AI, or you for the hint)
+    const buildPredictBody = () => {
         // gather information for api request
         const player_position = playerInfo[gameState.currentPlayer].douzeroPlayerPosition;
         const player_hand_cards = cardArr2DouzeroFormat(gameState.hands[gameState.currentPlayer].slice().reverse());
@@ -376,9 +601,16 @@ function PvEDoudizhuDemoView() {
             played_cards_landlord_down,
             played_cards_landlord_up,
         };
+        return requestBody;
+    };
+
+    const requestApiPlay = async () => {
+        const token = gameToken;
+        const requestBody = buildPredictBody();
 
         try {
             const apiRes = await axios.post(`${douzeroDemoUrl}/predict`, qs.stringify(requestBody));
+            if (token !== gameToken) return;
             const data = apiRes.data;
 
             if (data.status !== 0) {
@@ -402,6 +634,7 @@ function PvEDoudizhuDemoView() {
                         rival_move,
                     };
                     const apiRes = await axios.post(`${douzeroDemoUrl}/legal`, qs.stringify(requestBody));
+                    if (token !== gameToken) return;
                     if (apiRes.data.legal_action === '') {
                         proceedNextTurn([]);
                         setPredictionRes({
@@ -416,7 +649,7 @@ function PvEDoudizhuDemoView() {
                         });
                     } else {
                         Message({
-                            message: 'Error receiving prediction result, please try refresh the page',
+                            message: t('doudizhu.msg_network_error'),
                             type: 'error',
                             showClose: true,
                         });
@@ -456,7 +689,7 @@ function PvEDoudizhuDemoView() {
             }
         } catch (err) {
             Message({
-                message: 'Error receiving prediction result, please try refresh the page',
+                message: t('doudizhu.msg_network_error'),
                 type: 'error',
                 showClose: true,
             });
@@ -487,18 +720,21 @@ function PvEDoudizhuDemoView() {
                 index: 0,
                 role: 'peasant',
                 douzeroPlayerPosition: -1,
+                agentInfo: { name: playerNames[0] },
             },
             {
                 id: 1,
                 index: 1,
                 role: 'peasant',
                 douzeroPlayerPosition: -1,
+                agentInfo: { name: playerNames[1] },
             },
             {
                 id: 2,
                 index: 2,
                 role: 'peasant',
                 douzeroPlayerPosition: -1,
+                agentInfo: { name: playerNames[2] },
             },
         ];
         switch (role) {
@@ -524,6 +760,105 @@ function PvEDoudizhuDemoView() {
         initHands[landlordIdx] = initHands[landlordIdx].concat(threeLandlordCards.slice());
         setGameStatus('playing');
         syncGameStatus = 'playing';
+    };
+
+    // ---- bidding phase (叫分): runs between "ready" and "playing" ----
+    const startBidding = () => {
+        // every seat is a peasant until the bidding is over, the board needs this to lay out the three seats
+        playerInfo = [0, 1, 2].map((i) => ({
+            id: i,
+            index: i,
+            role: 'peasant',
+            douzeroPlayerPosition: -1,
+            agentInfo: { name: playerNames[i] },
+        }));
+        // show the hands that have been dealt (17 cards each, the three bottom cards stay hidden)
+        setGameState({
+            hands: initHands.map((hand) => sortDoudizhuCards(hand)),
+            latestAction: [[], [], []],
+            currentPlayer: null,
+            turn: 0,
+        });
+        setBidState(createBidState(firstBidder));
+        setGameStatus('bidding');
+        syncGameStatus = 'bidding';
+    };
+
+    const redealAndBid = () => {
+        dealNewGame();
+        startBidding();
+    };
+
+    const handleBid = (bid) => {
+        setBidState(applyBid(bidState, mainPlayerId, bid));
+    };
+
+    // "直接认输": the player loses 3 points at once, nothing else changes. Only possible while the bidding is going on:
+    // once the cards are being played a lost game costs more than 3 points, so conceding would be a cheap way out.
+    const CONCEDE_POINTS = 3;
+    const handleConcede = () => {
+        if (gameStatus !== 'bidding') return;
+        gameToken++; // answers of the AI that are still on their way are dropped
+        if (gameStateTimeout) clearTimeout(gameStateTimeout);
+        clearSnapshot();
+        const landlordIdx = finalBid.landlordIdx; // -1 while the bidding is still going on
+        const base = landlordIdx >= 0 ? finalBid.points : 0;
+        const multiplier = Math.pow(2, bombNum);
+        const result = {
+            concede: true,
+            base,
+            multiplier,
+            bombCount: bombNum,
+            spring: false,
+            antiSpring: false,
+            landlordIdx,
+            landlordWon: false,
+            deltas: [-CONCEDE_POINTS, 0, 0],
+        };
+        setSettlement(result);
+        resultPhrase = pickPhrase({
+            win: false,
+            lose: true,
+            concede: true,
+            landlord: landlordIdx === mainPlayerId,
+            peasant: landlordIdx >= 0 && landlordIdx !== mainPlayerId,
+            bomb: bombNum,
+            self_bomb: bombCounts[mainPlayerId],
+            other_bomb: bombNum - bombCounts[mainPlayerId],
+            spring: false,
+            reverse_spring: false,
+            hand_left: gameState.hands[mainPlayerId].length,
+            base,
+            multiplier,
+        });
+        gameEndDialogTitle =
+            (i18n.language || '').startsWith('zh') && resultPhrase ? resultPhrase : t('doudizhu.concede_title');
+        setGameStatus('over');
+        syncGameStatus = 'over';
+        setHideRivalHand(false);
+        setIsPassDisabled(true);
+        setIsHintDisabled(true);
+        setSelectedCards([]);
+        axios
+            .post(`${douzeroDemoUrl}/score/record`, {
+                id: myPlayerId,
+                deltas: result.deltas,
+                winners: [false, false, false],
+                info: { concede: true, base, multiplier, bombs: bombNum, landlord: landlordIdx, deal: dealId },
+            })
+            .then((res) => setScoreData(res.data))
+            .catch(() =>
+                Message({ message: t('doudizhu.msg_network_error'), type: 'error', showClose: true }),
+            );
+        const table = document.querySelector('.doudizhu-gameboard-paper');
+        if (table) {
+            const rect = table.getBoundingClientRect();
+            let offset = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dz-dialog-top'));
+            if (!(offset >= 0)) offset = 100;
+            const zoom = parseFloat(document.querySelector('.doudizhu-view-container').style.zoom) || 1;
+            setDialogAnchor({ x: rect.left + rect.width / 2, y: rect.top + offset * zoom });
+        } else setDialogAnchor(null);
+        setTimeout(() => setIsGameEndDialogOpen(true), getSetting('resultDelayMs', 100));
     };
 
     const gameStateTimer = () => {
@@ -573,22 +908,19 @@ function PvEDoudizhuDemoView() {
 
     const handleCloseGameEndDialog = () => {
         // reset all game state for new game
-        shuffledDoudizhuDeck = shuffleArray(fullDoudizhuDeck.slice());
-
-        threeLandlordCards = shuffleArray(sortDoudizhuCards(shuffledDoudizhuDeck.slice(0, 3)));
-        originalThreeLandlordCards = threeLandlordCards.slice();
-
-        initHands = [
-            shuffledDoudizhuDeck.slice(3, 20),
-            shuffledDoudizhuDeck.slice(20, 37),
-            shuffledDoudizhuDeck.slice(37, 54),
-        ];
+        gameToken++;
+        dealNewGame();
 
         playerInfo = [];
 
         gameStateTimeout = null;
         gameHistory = [];
         bombNum = 0;
+        bombCounts = [0, 0, 0];
+        playCounts = [0, 0, 0];
+        finalBid = { landlordIdx: -1, points: 0 };
+        setSettlement(null);
+        resultPhrase = null;
         lastMoveLandlord = [];
         lastMoveLandlordDown = [];
         lastMoveLandlordUp = [];
@@ -610,6 +942,7 @@ function PvEDoudizhuDemoView() {
         setSelectedCards([]); // user selected hand card
         setPredictionRes({ prediction: [], hands: [] });
         setHideRivalHand(hidePredictionArea);
+        setBidState(createBidState(null));
 
         setGameStatus('ready');
         syncGameStatus = 'ready';
@@ -618,6 +951,7 @@ function PvEDoudizhuDemoView() {
 
     const startGame = async () => {
         // start game
+        const token = gameToken;
         setGameStatus('playing');
         syncGameStatus = 'playing';
         const newGameState = deepCopy(gameState);
@@ -633,12 +967,26 @@ function PvEDoudizhuDemoView() {
                 player_hand_cards,
                 rival_move,
             };
-            const apiRes = await axios.post(`${douzeroDemoUrl}/legal`, qs.stringify(requestBody));
+            let apiRes;
+            try {
+                apiRes = await axios.post(`${douzeroDemoUrl}/legal`, qs.stringify(requestBody));
+            } catch (err) {
+                if (token === gameToken) {
+                    Message({
+                        message: t('doudizhu.msg_network_error'),
+                        type: 'error',
+                        showClose: true,
+                    });
+                }
+                return;
+            }
+            if (token !== gameToken) return;
             const data = apiRes.data;
             legalActions = {
                 turn: 0,
                 actions: data.legal_action.split(','),
             };
+            setLegalVersion((v) => v + 1);
             setIsHintDisabled(data.legal_action === '');
         }
 
@@ -665,18 +1013,153 @@ function PvEDoudizhuDemoView() {
         if (gameStatus === 'playing') startGame();
     }, [gameStatus]);
 
+    // tell the backend that this player has opened the page: it knows the player by the ID kept in this browser
+    // (a new one is made on the first visit), and sends the nickname and the saved scores
+    const applyPlayerData = (data) => {
+        playerNames = data.names;
+        // the game may already have started (auto start): put the names on the players now
+        playerInfo.forEach((info, i) => {
+            info.agentInfo = { ...(info.agentInfo || {}), name: playerNames[i] };
+        });
+        setScoreData(data);
+    };
+    useEffect(() => {
+        let storedId = '';
+        try {
+            storedId = localStorage.getItem(PLAYER_ID_KEY) || '';
+        } catch (e) {}
+        axios
+            .post(`${douzeroDemoUrl}/player/init`, { id: storedId })
+            .then((res) => {
+                myPlayerId = res.data.id;
+                try {
+                    localStorage.setItem(PLAYER_ID_KEY, myPlayerId);
+                } catch (e) {}
+                applyPlayerData(res.data);
+                // the first visit: the player has to choose a nickname before playing
+                if (!res.data.nickname) {
+                    setNickAnchor(tableCenter());
+                    setNicknameInput('');
+                    setNicknameDialog({ open: true, required: true });
+                }
+            })
+            .catch(() => {});
+    }, []);
+
+    // the nickname windows are centred on the table (on the same vertical axis as the line "底分 xx")
+    const tableCenter = () => {
+        const table = document.querySelector('.doudizhu-gameboard-paper');
+        if (!table) return null;
+        const rect = table.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    };
+
+    const openNicknameDialog = () => {
+        setNickAnchor(tableCenter());
+        setNicknameInput(playerNames[mainPlayerId] || '');
+        setNicknameDialog({ open: true, required: false });
+    };
+
+    const submitNickname = () => {
+        const nickname = nicknameInput.trim();
+        if (!nickname) return;
+        axios
+            .post(`${douzeroDemoUrl}/player/nickname`, { id: myPlayerId, nickname })
+            .then((res) => {
+                applyPlayerData(res.data);
+                setNicknameDialog({ open: false, required: false });
+            })
+            .catch(() =>
+                Message({ message: t('doudizhu.msg_network_error'), type: 'error', showClose: true }),
+            );
+    };
+
+    const clearScore = () => {
+        setIsClearScoreDialogOpen(false);
+        axios
+            .post(`${douzeroDemoUrl}/score/reset`, { id: myPlayerId })
+            .then((res) => applyPlayerData(res.data))
+            .catch(() =>
+                Message({ message: t('doudizhu.msg_network_error'), type: 'error', showClose: true }),
+            );
+    };
+
+    // scale the whole table to the window, and keep track of fullscreen mode
+    useEffect(() => {
+        const updateScale = () => {
+            const fullscreen = !!document.fullscreenElement;
+            setIsFullscreen(fullscreen);
+            document.body.classList.toggle('dz-fullscreen', fullscreen);
+            const availableHeight = window.innerHeight - (fullscreen ? 0 : 80);
+            const next = Math.min(window.innerWidth / 1412, availableHeight / 690);
+            // scale by the available height (and by the width when the window is narrow); when the window is wider
+            // than that, the table is made wider instead of leaving empty space on the sides
+            setViewScale(Math.max(0.6, Math.min(2.5, next)));
+            setViewWidth(window.innerWidth);
+        };
+        updateScale();
+        window.addEventListener('resize', updateScale);
+        document.addEventListener('fullscreenchange', updateScale);
+        return () => {
+            window.removeEventListener('resize', updateScale);
+            document.removeEventListener('fullscreenchange', updateScale);
+            document.body.classList.remove('dz-fullscreen');
+        };
+    }, []);
+
+    const toggleFullscreen = () => {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+    };
+
+    // start the next game (bidding) as soon as the table is ready, without clicking "开始游戏"
+    useEffect(() => {
+        if (gameStatus === 'ready' && getSetting('autoStart', true)) startBidding();
+    }, [gameStatus]);
+
+    // AI players bid when it is their turn
+    useEffect(() => {
+        if (
+            gameStatus !== 'bidding' ||
+            bidState.finished ||
+            bidState.current === null ||
+            bidState.current === mainPlayerId
+        )
+            return undefined;
+        const player = bidState.current;
+        const handle = setTimeout(() => {
+            setBidState(applyBid(bidState, player, aiBid(initHands[player], bidState.highest)));
+        }, Math.min(apiPlayDelay, 2000));
+        return () => clearTimeout(handle);
+    }, [gameStatus, bidState, apiPlayDelay]);
+
+    // bidding is over: pause briefly so that the result is visible, then start the game (or redeal)
+    useEffect(() => {
+        if (gameStatus !== 'bidding' || !bidState.finished) return undefined;
+        const handle = setTimeout(() => {
+            if (bidState.highestBidder < 0) redealAndBid();
+            else {
+                finalBid = { landlordIdx: bidState.highestBidder, points: bidState.highest };
+                handleSelectRole(landlordIdxToRole[bidState.highestBidder]);
+            }
+        }, getSetting('bidResultDelayMs', 100));
+        return () => clearTimeout(handle);
+    }, [gameStatus, bidState]);
+
     const handleMainPlayerAct = (type) => {
         switch (type) {
             case 'play': {
                 // check if cards to play is in legal action list
                 if (gameState.turn === legalActions.turn) {
-                    if (
-                        legalActions.actions.indexOf(cardArr2DouzeroFormat(sortDoudizhuCards(selectedCards, true))) >= 0
-                    ) {
+                    if (isLegalSelection(selectedCards)) {
+                        // the play is accepted: the list of this turn is used up, so that the button is really disabled
+                        // at once (a second click on it must not do anything) until the next turn of the user
+                        legalActions = { turn: -1, actions: [] };
+                        setLegalVersion((v) => v + 1);
                         proceedNextTurn(selectedCards, false);
                     } else {
                         Message({
-                            message: 'Selected cards are not legal action',
+                            message: t('doudizhu.msg_illegal_play'),
                             type: 'warning',
                             showClose: true,
                         });
@@ -684,7 +1167,7 @@ function PvEDoudizhuDemoView() {
                     }
                 } else {
                     Message({
-                        message: 'Legal Action not received or turn info inconsistant',
+                        message: t('doudizhu.msg_network_error'),
                         type: 'error',
                         showClose: true,
                     });
@@ -702,25 +1185,69 @@ function PvEDoudizhuDemoView() {
             }
             case 'hint': {
                 if (gameState.turn === legalActions.turn) {
-                    setSelectedCards([]);
-                    hintIdx++;
-                    if (hintIdx >= legalActions.actions.length) {
-                        hintIdx = 0;
-                    }
-                    const hintRanks = legalActions.actions[hintIdx].split('');
-                    let hintCards = [];
-                    gameState.hands[gameState.currentPlayer].forEach((card) => {
-                        const { rank } = card2SuiteAndRank(card);
-                        const idx = hintRanks.indexOf(rank);
-                        if (idx >= 0) {
-                            hintRanks.splice(idx, 1);
-                            hintCards.push(card);
+                    const turn = legalActions.turn;
+                    const token = gameToken;
+                    const hand = gameState.hands[gameState.currentPlayer];
+                    // select the cards of an action (a string of ranks) in your hand
+                    const selectAction = (action) => {
+                        const ranks = action.split('');
+                        const cards = [];
+                        hand.forEach((card) => {
+                            const { rank } = card2SuiteAndRank(card);
+                            const idx = ranks.indexOf(rank);
+                            if (idx >= 0) {
+                                ranks.splice(idx, 1);
+                                cards.push(card);
+                            }
+                        });
+                        setSelectedCards(cards);
+                    };
+                    // the old behaviour, used when the backend cannot answer: the legal actions one after another
+                    const cycleHint = () => {
+                        hintIdx++;
+                        if (hintIdx >= legalActions.actions.length) hintIdx = 0;
+                        selectAction(legalActions.actions[hintIdx]);
+                    };
+                    const showBest = (action) => {
+                        if (action === '') {
+                            setSelectedCards([]);
+                            Message({ message: t('doudizhu.hint_pass'), type: 'info', showClose: true });
+                        } else {
+                            selectAction(action);
                         }
-                    });
-                    setSelectedCards(hintCards);
+                    };
+                    setSelectedCards([]);
+                    if (hintBest.turn === turn && hintBest.token === token) {
+                        // asked before in this turn: the same answer, no new request
+                        showBest(hintBest.action);
+                    } else if (legalActions.actions.length === 1) {
+                        showBest(legalActions.actions[0]);
+                    } else {
+                        // ask the model, like the AI players do: the hint is the action with the best win rate
+                        axios
+                            .post(`${douzeroDemoUrl}/predict`, qs.stringify(buildPredictBody()))
+                            .then((apiRes) => {
+                                if (token !== gameToken || turn !== legalActions.turn) return;
+                                const result = apiRes.data && apiRes.data.status === 0 ? apiRes.data.result : null;
+                                const keys = result ? Object.keys(result) : [];
+                                if (keys.length === 0) {
+                                    cycleHint();
+                                    return;
+                                }
+                                let best = keys[0];
+                                keys.forEach((k) => {
+                                    if (Number(result[k]) > Number(result[best])) best = k;
+                                });
+                                hintBest = { turn, token, action: best };
+                                showBest(best);
+                            })
+                            .catch(() => {
+                                if (token === gameToken && turn === legalActions.turn) cycleHint();
+                            });
+                    }
                 } else {
                     Message({
-                        message: 'Legal Action not received or turn info inconsistant',
+                        message: t('doudizhu.msg_network_error'),
                         type: 'error',
                         showClose: true,
                     });
@@ -729,6 +1256,65 @@ function PvEDoudizhuDemoView() {
             }
         }
     };
+
+    // keyboard shortcuts. The keys are read from public/hotkeys.js (window.DOUDIZHU_HOTKEYS), which can be edited
+    // without rebuilding the page.
+    //   play key:  plays the selected cards (same as the 出牌 button), no effect otherwise
+    //   pass key:  nothing selected -> pass (same as the 不出 button); something selected -> clear the selection;
+    //              during the bidding it means 不叫
+    useEffect(() => {
+        const onKeyDown = (e) => {
+            if (e.repeat || e.ctrlKey || e.altKey || e.metaKey) return;
+            const target = e.target;
+            if (
+                target &&
+                (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) ||
+                    target.isContentEditable ||
+                    (target.getAttribute && target.getAttribute('role') === 'slider'))
+            )
+                return;
+            const keys = window.DOUDIZHU_HOTKEYS || {};
+            const matches = (list, fallback) =>
+                (Array.isArray(list) ? list : fallback).some((k) => String(k).toLowerCase() === e.key.toLowerCase());
+            const isPlayKey = matches(keys.play, [' ']);
+            const isPassKey = matches(keys.passOrDeselect, ['d']);
+            if (!isPlayKey && !isPassKey) return;
+
+            // during the bidding: the pass key means 不叫
+            if (
+                isPassKey &&
+                gameStatus === 'bidding' &&
+                !bidState.finished &&
+                bidState.current === mainPlayerId
+            ) {
+                e.preventDefault();
+                handleBid(0);
+                return;
+            }
+
+            // only while it is the user's turn in a running game, and the legal actions of this turn have arrived
+            const myTurn =
+                gameStatus === 'playing' &&
+                !isGameEndDialogOpen &&
+                gameState.currentPlayer === mainPlayerId &&
+                gameState.turn === legalActions.turn;
+            if (!myTurn) return;
+
+            if (isPlayKey) {
+                // a focused button would also be "clicked" by the space key: take the focus away from it
+                if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+                e.preventDefault();
+                // the play key does nothing while the play button is grey
+                if (isLegalSelection(selectedCards)) handleMainPlayerAct('play');
+            } else if (isPassKey) {
+                e.preventDefault();
+                if (selectedCards.length > 0) handleMainPlayerAct('deselect');
+                else if (!isPassDisabled) handleMainPlayerAct('pass');
+            }
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    });
 
     const computePredictionCards = (cards, hands) => {
         let computedCards = [];
@@ -770,6 +1356,51 @@ function PvEDoudizhuDemoView() {
                 </div>
             );
         }
+    };
+
+    // Card counter: how many cards of each rank are still unseen, i.e. neither in the user's hand nor played yet.
+    // Only public information is used (the user's own hand and the cards played so far).
+    const COUNTER_RANKS = [
+        { key: 'D', label: t('doudizhu.counter_big_joker'), max: 1 },
+        { key: 'X', label: t('doudizhu.counter_small_joker'), max: 1 },
+        ...['2', 'A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3'].map((r) => ({
+            key: r,
+            label: r === 'T' ? '10' : r,
+            max: 4,
+        })),
+    ];
+
+    const computeCardCounter = () => {
+        const isZh = (i18n.language || '').startsWith('zh');
+        const remaining = {};
+        COUNTER_RANKS.forEach((r) => (remaining[r.key] = r.max));
+        const take = (card) => {
+            const rank = card === 'RJ' ? 'D' : card === 'BJ' ? 'X' : card.charAt(1);
+            if (remaining[rank] > 0) remaining[rank]--;
+        };
+        gameState.hands[mainPlayerId].forEach(take);
+        gameHistory.forEach((record) => record.forEach(take));
+
+        return (
+            <div className="card-counter">
+                <div className="card-counter-title doudizhu-panel-title">{t('doudizhu.card_counter')}</div>
+                {COUNTER_RANKS.map((r) => (
+                    <div key={'counter-' + r.key} className={'card-counter-row' + (remaining[r.key] === 0 ? ' empty' : '')}>
+                        <span
+                            className={'card-counter-label' + (r.key === 'D' && !isZh ? ' big-joker' : '')}
+                        >
+                            {r.label}
+                        </span>
+                        <span className="card-counter-pips">
+                            {Array.from({ length: r.max }).map((_, i) => (
+                                <span key={i} className={'pip' + (i < remaining[r.key] ? ' on' : '')} />
+                            ))}
+                        </span>
+                        <span className="card-counter-number">{remaining[r.key]}</span>
+                    </div>
+                ))}
+            </div>
+        );
     };
 
     const computeProbabilityItem = (idx) => {
@@ -881,63 +1512,202 @@ function PvEDoudizhuDemoView() {
         <div>
             <Dialog
                 disableBackdropClick
+                disableEscapeKeyDown
+                BackdropProps={{ style: { backgroundColor: 'rgba(0, 0, 0, 0.15)' } }}
+                PaperProps={
+                    dialogAnchor
+                        ? {
+                              style: {
+                                  position: 'absolute',
+                                  left: dialogAnchor.x,
+                                  top: dialogAnchor.y,
+                                  margin: 0,
+                                  transform: 'translateX(-50%)',
+                                  maxHeight: '96vh',
+                              },
+                          }
+                        : undefined
+                }
                 open={isGameEndDialogOpen}
                 onClose={handleCloseGameEndDialog}
                 aria-labelledby="alert-dialog-title"
                 aria-describedby="alert-dialog-description"
             >
-                <DialogTitle id="alert-dialog-title" style={{ width: '200px' }}>
+                <DialogTitle id="alert-dialog-title" style={{ padding: '12px 24px 0', textAlign: 'center' }}>
                     {gameEndDialogTitle}
                 </DialogTitle>
                 <DialogContent>
-                    <TableContainer className="doudizhu-statistic-table" component={Paper}>
-                        <Table aria-label="statistic table">
-                            <TableHead>
-                                <TableRow>
-                                    <TableCell>{t('doudizhu.role')}</TableCell>
-                                    <TableCell>{t('doudizhu.win')}</TableCell>
-                                    <TableCell>{t('doudizhu.total')}</TableCell>
-                                    <TableCell>{t('doudizhu.win_rate')}</TableCell>
-                                </TableRow>
-                            </TableHead>
-                            <TableBody>
-                                {statisticRows.map((row) => (
-                                    <TableRow key={'statistic-row-' + row.role}>
-                                        <TableCell component="th" scope="row">
-                                            {row.role}
-                                        </TableCell>
-                                        <TableCell>{row.win}</TableCell>
-                                        <TableCell>{row.total}</TableCell>
-                                        <TableCell>{row.winRate}</TableCell>
-                                    </TableRow>
-                                ))}
-                            </TableBody>
-                        </Table>
-                    </TableContainer>
+                    {settlement && (
+                        <div className="doudizhu-score-summary">
+                            {!settlement.concede && (<div style={{ marginBottom: '8px', fontSize: '14px' }}>
+                                {t('doudizhu.base_score')}{/[\u4e00-\u9fff]$/.test(t('doudizhu.base_score')) ? '' : ' '}{settlement.base} × {t('doudizhu.multiplier')}{/[\u4e00-\u9fff]$/.test(t('doudizhu.multiplier')) ? '' : ' '}{settlement.multiplier}
+                                {(() => {
+                                    // every reason for a doubling, joined with +, in one pair of brackets
+                                    const reasons = [];
+                                    if (settlement.bombCount > 0) reasons.push(t('doudizhu.bombs_n', { n: settlement.bombCount }));
+                                    if (settlement.spring) reasons.push(t('doudizhu.spring'));
+                                    if (settlement.antiSpring) reasons.push(t('doudizhu.anti_spring'));
+                                    return reasons.length > 0
+                                        ? `${t('doudizhu.remark_open')}${reasons.join(' + ')}${t('doudizhu.remark_close')}`
+                                        : '';
+                                })()}
+                            </div>)}
+                            <TableContainer component={Paper} style={{ marginBottom: '4px' }}>
+                                <Table size="small" aria-label="score table">
+                                    <TableHead>
+                                        <TableRow>
+                                            <TableCell>ID</TableCell>
+                                            <TableCell>{t('doudizhu.this_game')}</TableCell>
+                                            <TableCell>{t('doudizhu.total_score')}</TableCell>
+                                        </TableRow>
+                                    </TableHead>
+                                    <TableBody>
+                                        {[0, 1, 2].map((i) => (
+                                            <TableRow key={'score-row-' + i}>
+                                                <TableCell component="th" scope="row">
+                                                    {playerNames[i]}
+                                                    {i === settlement.landlordIdx ? ' ★' : ''}
+                                                </TableCell>
+                                                <TableCell>
+                                                    {settlement.deltas[i] > 0 ? '+' : ''}
+                                                    {settlement.deltas[i]}
+                                                </TableCell>
+                                                <TableCell>
+                                                    {scoreData && scoreData.scores ? scoreData.scores[i] : '-'}
+                                                </TableCell>
+                                            </TableRow>
+                                        ))}
+                                    </TableBody>
+                                </Table>
+                            </TableContainer>
+                            <div className="deal-id">{dealId}</div>
+                        </div>
+                    )}
                 </DialogContent>
-                <DialogActions>
-                    <Button onClick={() => handleResetStatistics()}>{t('reset')}</Button>
+                <DialogActions style={{ justifyContent: 'center', padding: '2px 8px 2px' }}>
                     <Button
                         onClick={() => handleCloseGameEndDialog()}
                         color="primary"
                         variant="contained"
                         autoFocus
-                        style={{ margin: '16px' }}
+                        style={{ margin: '4px 16px 16px 16px' }}
                     >
                         {t('play_again')}
                     </Button>
                 </DialogActions>
             </Dialog>
-            <div className={'doudizhu-view-container'}>
-                <Layout.Row style={{ height: '540px' }}>
-                    <Layout.Col style={{ height: '100%' }} span="17">
-                        <div style={{ height: '100%' }}>
+            <Dialog
+                open={nicknameDialog.open}
+                disableBackdropClick={nicknameDialog.required}
+                disableEscapeKeyDown={nicknameDialog.required}
+                onClose={() => setNicknameDialog({ open: false, required: false })}
+                aria-labelledby="nickname-dialog-title"
+                PaperProps={
+                    nickAnchor
+                        ? {
+                              style: {
+                                  position: 'absolute',
+                                  left: nickAnchor.x,
+                                  top: nickAnchor.y,
+                                  margin: 0,
+                                  transform: 'translate(-50%, -50%)',
+                              },
+                          }
+                        : undefined
+                }
+            >
+                <DialogTitle id="nickname-dialog-title">
+                    {nicknameDialog.required ? t('doudizhu.nickname_title') : t('doudizhu.change_nickname')}
+                </DialogTitle>
+                <DialogContent>
+                    <TextField
+                        autoFocus
+                        fullWidth
+                        value={nicknameInput}
+                        placeholder={t('doudizhu.nickname_hint', { n: NICKNAME_MAX })}
+                        inputProps={{ maxLength: NICKNAME_MAX }}
+                        onChange={(e) => setNicknameInput(e.target.value)}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter') submitNickname();
+                        }}
+                    />
+                </DialogContent>
+                <DialogActions style={{ padding: '8px 24px 16px' }}>
+                    {!nicknameDialog.required && (
+                        <Button onClick={() => setNicknameDialog({ open: false, required: false })}>
+                            {t('doudizhu.cancel')}
+                        </Button>
+                    )}
+                    <Button
+                        onClick={submitNickname}
+                        color="primary"
+                        variant="contained"
+                        disabled={!nicknameInput.trim()}
+                    >
+                        {t('doudizhu.ok')}
+                    </Button>
+                </DialogActions>
+            </Dialog>
+            <Dialog
+                open={isClearScoreDialogOpen}
+                onClose={() => setIsClearScoreDialogOpen(false)}
+                PaperProps={
+                    nickAnchor
+                        ? {
+                              style: {
+                                  position: 'absolute',
+                                  left: nickAnchor.x,
+                                  top: nickAnchor.y,
+                                  margin: 0,
+                                  transform: 'translate(-50%, -50%)',
+                              },
+                          }
+                        : undefined
+                }
+            >
+                <DialogTitle>{t('doudizhu.clear_score_title')}</DialogTitle>
+                <DialogContent>{t('doudizhu.clear_score_text')}</DialogContent>
+                <DialogActions style={{ padding: '8px 24px 16px' }}>
+                    <Button onClick={() => setIsClearScoreDialogOpen(false)}>{t('doudizhu.cancel')}</Button>
+                    <Button onClick={clearScore} color="primary" variant="contained">
+                        {t('doudizhu.clear_score_ok')}
+                    </Button>
+                </DialogActions>
+            </Dialog>
+            {/* the header is hidden in fullscreen mode, so the way out is this semi-transparent button (Esc also works on a computer) */}
+            {isFullscreen && (
+                <Button className="exit-fullscreen-button" size="small" variant="outlined" onClick={toggleFullscreen}>
+                    {t('doudizhu.exit_fullscreen')}
+                </Button>
+            )}
+            <div className={'doudizhu-view-container'} style={{ zoom: viewScale, width: Math.max(1400, Math.floor(viewWidth / viewScale) - 12) + 'px' }}>
+                <Layout.Row style={{ height: '582px', marginTop: '5px' }}>
+                    <Layout.Col style={{ height: '100%', width: '80.5%' }} span="17">
+                        <div style={{ height: '100%', position: 'relative' }}>
+                            {(gameStatus === 'playing' || gameStatus === 'over') && finalBid.landlordIdx >= 0 && (
+                                <div className="doudizhu-base-multiplier">
+                                    <div>{`${t('doudizhu.base_score')} ${finalBid.points}`}</div>
+                                    <div>{`${t('doudizhu.multiplier')} ${currentMultiplier(bombNum)}`}</div>
+                                </div>
+                            )}
                             <Paper className={'doudizhu-gameboard-paper'} elevation={3}>
                                 <DoudizhuGameBoard
-                                    showCardBack={gameStatus === 'playing' && hideRivalHand}
+                                    showCardBack={(gameStatus === 'playing' || gameStatus === 'bidding') && hideRivalHand}
                                     handleSelectRole={handleSelectRole}
+                                    handleStartBidding={startBidding}
+                                    handleBid={handleBid}
+                                    handleConcede={handleConcede}
+                                    handleChangeNickname={openNicknameDialog}
+                                    scores={scoreData && scoreData.scores ? scoreData.scores : null}
+                                    bidState={bidState}
                                     isPassDisabled={isPassDisabled}
                                     isHintDisabled={isHintDisabled}
+                                    isPlayDisabled={
+                                        gameStatus !== 'playing' ||
+                                        gameState.currentPlayer !== mainPlayerId ||
+                                        gameState.turn !== legalActions.turn
+                                    }
+                                    isPlayValid={isLegalSelection(selectedCards)}
                                     gamePlayable={true}
                                     playerInfo={playerInfo}
                                     hands={gameState.hands}
@@ -959,11 +1729,11 @@ function PvEDoudizhuDemoView() {
                             </Paper>
                         </div>
                     </Layout.Col>
-                    <Layout.Col span="7" style={{ height: '100%' }}>
+                    <Layout.Col span="7" style={{ height: '100%', width: '19.5%' }}>
                         <Paper className={'doudizhu-probability-paper'} elevation={3}>
                             {playerInfo.length > 0 && gameState.currentPlayer !== null ? (
                                 <div style={{ padding: '16px' }}>
-                                    <span style={{ textAlign: 'center', marginBottom: '8px', display: 'block' }}>
+                                    <span className="doudizhu-panel-title" style={{ marginBottom: '8px' }}>
                                         {t('doudizhu.three_landlord_cards')}
                                     </span>
                                     <div className="playingCards" style={{ display: 'flex', justifyContent: 'center' }}>
@@ -996,6 +1766,14 @@ function PvEDoudizhuDemoView() {
                                 </div>
                             )}
                             <Divider />
+                            {hidePredictionArea ? (
+                                gameState.currentPlayer !== null && (gameStatus === 'playing' || gameStatus === 'over') ? (
+                                    computeCardCounter()
+                                ) : (
+                                    <div style={{ padding: '16px', textAlign: 'center' }}>{t('waiting...')}</div>
+                                )
+                            ) : (
+                                <>
                             <div className={'probability-player'} style={{ height: '19px', textAlign: 'center' }}>
                                 {playerInfo.length > 0 && gameState.currentPlayer !== null ? (
                                     <span>
@@ -1017,6 +1795,8 @@ function PvEDoudizhuDemoView() {
                                 <div className={'probability-item'}>{computeProbabilityItem(1)}</div>
                                 <div className={'probability-item'}>{computeProbabilityItem(2)}</div>
                             </div>
+                                </>
+                            )}
                         </Paper>
                     </Layout.Col>
                 </Layout.Row>
@@ -1024,16 +1804,19 @@ function PvEDoudizhuDemoView() {
                     <Paper className={'game-controller-paper'} elevation={3}>
                         <Layout.Row style={{ height: '51px' }}>
                             <Layout.Col span="6" style={{ height: '51px', lineHeight: '48px' }}>
-                                <FormGroup style={{ height: '100%' }}>
-                                    <FormControlLabel
-                                        style={{ textAlign: 'center', height: '100%', display: 'inline-block' }}
-                                        className="switch-control"
-                                        control={
-                                            <Switch checked={!hidePredictionArea} onChange={toggleHidePredictionArea} />
-                                        }
-                                        label={t('doudizhu.ai_hand_faceup')}
-                                    />
-                                </FormGroup>
+                                <div style={{ textAlign: 'center' }}>
+                                    <Button
+                                        className="reset-score-button"
+                                        size="small"
+                                        variant="outlined"
+                                        onClick={() => {
+                                            setNickAnchor(tableCenter());
+                                            setIsClearScoreDialogOpen(true);
+                                        }}
+                                    >
+                                        {t('doudizhu.clear_score')}
+                                    </Button>
+                                </div>
                             </Layout.Col>
                             <Layout.Col span="1" style={{ height: '100%', width: '1px' }}>
                                 <Divider orientation="vertical" />
@@ -1100,92 +1883,6 @@ function PvEDoudizhuDemoView() {
                             </Layout.Col>
                         </Layout.Row>
                     </Paper>
-                </div>
-                <div className="citation">
-                    {locale === 'en' ? (
-                        <>
-                            <p style={{ margin: '4px' }}>
-                                Too slow? Run the demo locally and check out more analysis tools (e.g., replays) with{' '}
-                                <a href="https://github.com/datamllab/rlcard-showdown" target="_blank">
-                                    RLCard-Showdown
-                                </a>
-                                !
-                            </p>
-                            <p style={{ margin: '4px', marginTop: '15px' }}>
-                                This demo is based on{' '}
-                                <a href="https://github.com/datamllab/rlcard" target="_blank">
-                                    RLCard
-                                </a>{' '}
-                                and{' '}
-                                <a href="https://github.com/kwai/DouZero" target="_blank">
-                                    DouZero
-                                </a>
-                                . If you find these projects useful, please cite:
-                            </p>
-                        </>
-                    ) : (
-                        <>
-                            <p style={{ margin: '4px' }}>
-                                运行太慢？使用{' '}
-                                <a href="https://github.com/datamllab/rlcard-showdown" target="_blank">
-                                    RLCard-Showdown
-                                </a>{' '}
-                                在本地运行该演示以及更多分析工具（如录像回放）!
-                            </p>
-                            <p style={{ margin: '4px', marginTop: '15px' }}>
-                                本演示基于{' '}
-                                <a href="https://github.com/datamllab/rlcard" target="_blank">
-                                    RLCard
-                                </a>{' '}
-                                和{' '}
-                                <a href="https://github.com/kwai/DouZero" target="_blank">
-                                    DouZero
-                                </a>{' '}
-                                项目。如果这些项目帮到您，请添加引用:
-                            </p>
-                        </>
-                    )}
-                    <p style={{ margin: '4px' }}>
-                        Zha, Daochen, et al. "RLCard: A Platform for Reinforcement Learning in Card Games." IJCAI. 2020.
-                    </p>
-                    <pre style={{ overflowX: 'auto' }}>
-                        {`@inproceedings{zha2020rlcard,
-  title={RLCard: A Platform for Reinforcement Learning in Card Games},
-  author={Zha, Daochen and Lai, Kwei-Herng and Huang, Songyi and Cao, Yuanpu and Reddy, Keerthana and Vargas, Juan and Nguyen, Alex and Wei, Ruzhe and Guo, Junyu and Hu, Xia},
-  booktitle={IJCAI},
-  year={2020}
-}`}
-                    </pre>
-                    {locale === 'en' ? (
-                        <>
-                            <p style={{ margin: '4pt' }}>and our ICML 2021 paper with</p>
-                        </>
-                    ) : (
-                        <>
-                            <p style={{ margin: '4pt' }}>以及ICML 2021论文</p>
-                        </>
-                    )}
-                    <p style={{ margin: '4pt' }}>
-                        Zha, Daochen et al. “DouZero: Mastering DouDizhu with Self-Play Deep Reinforcement Learning.”
-                        ICML (2021).
-                    </p>
-                    <pre style={{ overflowX: 'auto' }}>
-                        {`@InProceedings{pmlr-v139-zha21a,
-  title = 	 {DouZero: Mastering DouDizhu with Self-Play Deep Reinforcement Learning},
-  author =       {Zha, Daochen and Xie, Jingru and Ma, Wenye and Zhang, Sheng and Lian, Xiangru and Hu, Xia and Liu, Ji},
-  booktitle = 	 {Proceedings of the 38th International Conference on Machine Learning},
-  pages = 	 {12333--12344},
-  year = 	 {2021},
-  editor = 	 {Meila, Marina and Zhang, Tong},
-  volume = 	 {139},
-  series = 	 {Proceedings of Machine Learning Research},
-  month = 	 {18--24 Jul},
-  publisher =    {PMLR},
-  pdf = 	 {http://proceedings.mlr.press/v139/zha21a/zha21a.pdf},
-  url = 	 {http://proceedings.mlr.press/v139/zha21a.html},
-  abstract = 	 {Games are abstractions of the real world, where artificial agents learn to compete and cooperate with other agents. While significant achievements have been made in various perfect- and imperfect-information games, DouDizhu (a.k.a. Fighting the Landlord), a three-player card game, is still unsolved. DouDizhu is a very challenging domain with competition, collaboration, imperfect information, large state space, and particularly a massive set of possible actions where the legal actions vary significantly from turn to turn. Unfortunately, modern reinforcement learning algorithms mainly focus on simple and small action spaces, and not surprisingly, are shown not to make satisfactory progress in DouDizhu. In this work, we propose a conceptually simple yet effective DouDizhu AI system, namely DouZero, which enhances traditional Monte-Carlo methods with deep neural networks, action encoding, and parallel actors. Starting from scratch in a single server with four GPUs, DouZero outperformed all the existing DouDizhu AI programs in days of training and was ranked the first in the Botzone leaderboard among 344 AI agents. Through building DouZero, we show that classic Monte-Carlo methods can be made to deliver strong results in a hard domain with a complex action space. The code and an online demo are released at https://github.com/kwai/DouZero with the hope that this insight could motivate future work.}
-}`}
-                    </pre>
                 </div>
             </div>
         </div>

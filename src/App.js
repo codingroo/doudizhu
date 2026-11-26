@@ -9,23 +9,22 @@ const navbarSubtitleMap = {
     '/leaderboard': '',
     '/replay/doudizhu': 'Doudizhu',
     '/replay/leduc-holdem': "Leduc Hold'em",
-    '/pve/doudizhu-demo': 'Doudizhu PvE Demo',
+    '/doudizhu': 'Doudizhu PvE',
 };
 
 function App() {
     // todo: add 404 page
     return (
         <Router>
-            <Navbar subtitleMap={navbarSubtitleMap} />
+            <Navbar />
             <div style={{ marginTop: '75px' }}>
                 <Route exact path="/">
                     <Redirect to="/leaderboard?type=game&name=leduc-holdem" />
-                    {/* <Redirect to="/pve/doudizhu-demo" /> */}
                 </Route>
                 <Route path="/leaderboard" component={LeaderBoard} />
                 <Route path="/replay/doudizhu" component={DoudizhuReplayView} />
                 <Route path="/replay/leduc-holdem" component={LeducHoldemReplayView} />
-                <Route path="/pve/doudizhu-demo" component={PvEDoudizhuDemoView} />
+                <Route path="/doudizhu" component={PvEDoudizhuDemoView} />
             </div>
         </Router>
     );

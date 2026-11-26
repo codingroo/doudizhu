@@ -1,32 +1,35 @@
 import React, { useEffect, useState } from "react";
-import { Link, useLocation } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import logo_white from "../assets/images/logo_white.png";
-import GitHubIcon from "@material-ui/icons/GitHub";
 import AppBar from "@material-ui/core/AppBar";
-import axios from 'axios';
+import Button from "@material-ui/core/Button";
 
-function Navbar({subtitleMap}) {
-    const [stars, setStars] = useState('...');
-    let location = useLocation();
-    console.log(location.pathname, subtitleMap);
-    const subtitle = subtitleMap[location.pathname];
+function Navbar() {
+    const { t } = useTranslation();
+    const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
 
     useEffect(() => {
-        axios.get("https://api.github.com/repos/datamllab/rlcard")
-            .then(res=>{
-                setStars(res.data.stargazers_count);
-            });
-    }, [])
+        const update = () => setIsFullscreen(!!document.fullscreenElement);
+        document.addEventListener('fullscreenchange', update);
+        return () => document.removeEventListener('fullscreenchange', update);
+    }, []);
+
+    const toggleFullscreen = () => {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+    };
 
     return (
         <AppBar position="fixed" className={"header-bar-wrapper"}>
             <div className={"header-bar"}>
-                <Link to="/leaderboard"><img src={logo_white} alt={"Logo"} height="65px" /></Link>
-                <div className={"title unselectable"}><div className={"title-text"}>Showdown<span className={"subtitle"}>{subtitle ? '/ ' + subtitle : ''}</span></div></div>
-                <div className={"stretch"} />
-                <div className={"github-info"} onClick={()=>{window.location.href = 'https://github.com/datamllab/rlcard'}}>
-                    <div className={"github-icon"}><GitHubIcon /></div>
-                    <div className={"github-text"}>Github<br /><span>{stars} stars</span></div>
+                {/* the fullscreen button is where the logo was: the first thing a phone user can reach */}
+                <Button className={"header-fullscreen-button"} variant="outlined" onClick={toggleFullscreen}>
+                    {isFullscreen ? t('doudizhu.exit_fullscreen') : t('doudizhu.fullscreen')}
+                </Button>
+                {/* the logo and the title are in the middle of the page */}
+                <div className={"header-center"}>
+                    <img src={logo_white} alt={"Logo"} height="65px" />
+                    <div className={"title unselectable"}><div className={"title-text"}>斗地主<span className={"subtitle"}>智能单机版</span></div></div>
                 </div>
             </div>
         </AppBar>

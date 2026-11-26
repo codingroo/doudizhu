@@ -23,6 +23,33 @@ code {
 
 .el-message {
   z-index: 9999;
+  // the box is as wide as its text (the default minimum width of 300px is removed); everything is 1.5 times the
+  // default size: font 14 -> 21px, icon 40 -> 60px, paddings and the close button likewise
+  min-width: 0;
+  width: max-content;
+  max-width: 90vw;
+  padding: 15px 18px;
+
+  .el-message__img {
+    width: 60px;
+    height: 60px;
+  }
+
+  .el-message__group {
+    margin-left: 57px;
+    height: 30px;
+    line-height: 30px;
+
+    p {
+      font-size: 21px;
+      margin: 0 51px 0 0;
+    }
+  }
+
+  .el-message__closeBtn {
+    top: 4px;
+    font-size: 21px;
+  }
 }
 
 .citation {

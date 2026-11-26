@@ -1,14 +1,35 @@
 import itertools
+import os
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, redirect, request, send_from_directory
 from flask_cors import CORS
+from werkzeug.utils import safe_join
 
-app = Flask(__name__)
+# static_folder=None: Flask's built-in /static route would shadow the /static/ folder of the web page
+app = Flask(__name__, static_folder=None)
 CORS(app)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# the built web page (the output of `npm run build`); when it is present this server also serves the page
+WEB_DIR = os.path.join(BASE_DIR, 'web')
+GAME_PAGE = '/doudizhu'
+
+# ---- settings you may edit -------------------------------------------------
+# The name of the owner, who plays on this computer directly (visitors choose their own nickname in the page).
+PLAYER_ID = 'Max'
+# Names of the two AI players: [right-hand player, left-hand player]
+AI_NAMES = ['AI 赌圣', 'AI 赌神']
+# Where the data is kept (see score_store.py): the scores per player (used by the game page, do not edit),
+# the player records and the log of what happened (for you to read). Delete score.json to reset all scores.
+SCORE_FILE = os.path.join(BASE_DIR, 'score.json')
+PLAYERS_FILE = os.path.join(BASE_DIR, 'players.json')
+LOG_FILE = os.path.join(BASE_DIR, 'play.log')
+# ----------------------------------------------------------------------------
 
 from utils.move_generator import MovesGener
 from utils import move_detector as md, move_selector as ms
 from deep import DeepAgent
+import score_store
 
 EnvCard2RealCard = {3: '3', 4: '4', 5: '5', 6: '6', 7: '7',
                     8: '8', 9: '9', 10: 'T', 11: 'J', 12: 'Q',
@@ -18,11 +39,24 @@ RealCard2EnvCard = {'3': 3, '4': 4, '5': 5, '6': 6, '7': 7,
                     '8': 8, '9': 9, 'T': 10, 'J': 11, 'Q': 12,
                     'K': 13, 'A': 14, '2': 17, 'X': 20, 'D': 30}
 
-pretrained_dir = 'pretrained/douzero_pretrained'
+pretrained_dir = os.path.join(BASE_DIR, 'pretrained', 'douzero_pretrained')
+positions = ['landlord', 'landlord_down', 'landlord_up']
+
+# fail early with a readable message when the model files are not where we expect them
+missing = [p for p in positions
+           if not os.path.isfile(os.path.join(pretrained_dir, p + '.onnx'))
+           and not os.path.isfile(os.path.join(pretrained_dir, p + '.ckpt'))]
+if missing:
+    raise SystemExit(
+        '\nModel files not found.\n'
+        'Put these files into the folder below and start again:\n'
+        '    ' + pretrained_dir + '\n'
+        + ''.join('    %s.onnx\n' % p for p in missing))
+
 players = []
-for position in ['landlord', 'landlord_down', 'landlord_up']:
+for position in positions:
     players.append(DeepAgent(position, pretrained_dir, use_onnx=True))
-    
+
 @app.route('/predict', methods=['POST'])
 def predict():
     if request.method == 'POST':
@@ -244,9 +278,106 @@ def _get_legal_card_play_actions(player_hand_cards, rival_move):
 
     return moves
 
+def _paths():
+    return (SCORE_FILE, PLAYERS_FILE, LOG_FILE, PLAYER_ID)
+
+
+def _client_ip():
+    """The address of the visitor. Behind Caddy the real address is in X-Forwarded-For."""
+    forwarded = request.headers.get('X-Forwarded-For', '')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.remote_addr or ''
+
+
+def _is_local():
+    """True when the page is opened on this computer directly (not through a reverse proxy)."""
+    return (request.remote_addr in ('127.0.0.1', '::1')
+            and not request.headers.get('X-Forwarded-For') and not request.headers.get('X-Real-IP'))
+
+
+def _player_id():
+    """The ID that the page sends. The owner's ID only works on the computer itself."""
+    body = request.get_json(silent=True) or {}
+    player_id = body.get('id') or request.args.get('id') or ''
+    if player_id == score_store.OWNER_ID and not _is_local():
+        raise ValueError('unknown player')
+    return player_id, body
+
+
+def _bad(e):
+    return jsonify({'status': 1, 'message': str(e)}), 400
+
+
+@app.route('/player/init', methods=['POST'])
+def player_init():
+    body = request.get_json(silent=True) or {}
+    return jsonify(score_store.init_player(_paths(), AI_NAMES, str(body.get('id') or ''), _client_ip(), _is_local()))
+
+
+@app.route('/player/nickname', methods=['POST'])
+def player_nickname():
+    try:
+        player_id, body = _player_id()
+        return jsonify(score_store.set_nickname(_paths(), AI_NAMES, player_id, body.get('nickname'), _client_ip()))
+    except (ValueError, TypeError) as e:
+        return _bad(e)
+
+
+@app.route('/score', methods=['GET'])
+def get_score():
+    try:
+        player_id, _ = _player_id()
+        return jsonify(score_store.snapshot(_paths(), AI_NAMES, player_id))
+    except (ValueError, TypeError) as e:
+        return _bad(e)
+
+
+@app.route('/score/record', methods=['POST'])
+def record_score():
+    try:
+        player_id, body = _player_id()
+        deltas = [int(x) for x in body.get('deltas', [])]
+        winners = [bool(x) for x in body.get('winners', [])]
+        info = body.get('info') if isinstance(body.get('info'), dict) else {}
+        return jsonify(score_store.record(_paths(), AI_NAMES, player_id, deltas, winners, info, _client_ip()))
+    except (ValueError, TypeError) as e:
+        return _bad(e)
+
+
+@app.route('/score/reset', methods=['POST'])
+def reset_score():
+    try:
+        player_id, _ = _player_id()
+        return jsonify(score_store.reset(_paths(), AI_NAMES, player_id, _client_ip()))
+    except (ValueError, TypeError) as e:
+        return _bad(e)
+
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_web(path):
+    """Serve the built web page, so that one process is all that is needed."""
+    if not os.path.isfile(os.path.join(WEB_DIR, 'index.html')):
+        return ('The web page files were not found in %s.\n'
+                'This server only provides the API (POST /predict and /legal).' % WEB_DIR), 404
+    if path == '':
+        return redirect(GAME_PAGE)
+    full_path = safe_join(WEB_DIR, path)
+    if full_path is not None and os.path.isfile(full_path):
+        return send_from_directory(WEB_DIR, path)
+    if path.startswith('static/'):
+        return 'Not found', 404
+    # any other address is a route of the single-page app (e.g. /doudizhu): let it handle the address
+    return send_from_directory(WEB_DIR, 'index.html')
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='DouZero backend')
     parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--host', default='127.0.0.1')
+    parser.add_argument('--port', type=int, default=5000)
     args = parser.parse_args()
-    app.run(debug=args.debug)
+    if os.path.isfile(os.path.join(WEB_DIR, 'index.html')):
+        print('\n  Open http://%s:%d%s in your browser.\n' % (args.host, args.port, GAME_PAGE))
+    app.run(host=args.host, port=args.port, debug=args.debug)

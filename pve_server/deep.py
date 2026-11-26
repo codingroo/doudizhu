@@ -1,8 +1,20 @@
 import os
 
-import torch
 import numpy as np
 from collections import Counter
+
+
+def _require_torch():
+    # PyTorch is only needed when running the .ckpt models directly, or when the
+    # .onnx files have to be exported first. Pure ONNX inference does not need it.
+    try:
+        import torch
+    except ImportError as e:
+        raise ImportError(
+            'PyTorch is not installed, but it is needed here because the ONNX model '
+            'file (<position>.onnx) was not found in the model directory. Either put '
+            'the .onnx files there, or install PyTorch (CPU build is enough).') from e
+    return torch
 
 Card2Column = {3: 0, 4: 1, 5: 2, 6: 3, 7: 4, 8: 5, 9: 6, 10: 7,
                11: 8, 12: 9, 13: 10, 14: 11, 17: 12, 20: 13, 30: 14}
@@ -20,6 +32,7 @@ def _get_one_hot_bomb(bomb_num):
 
 def _load_model(position, model_dir, use_onnx):
     if not use_onnx or not os.path.isfile(os.path.join(model_dir, position+'.onnx')) :
+        torch = _require_torch()
         from models import model_dict
         model = model_dict[position]()
         model_state_dict = model.state_dict()
@@ -102,6 +115,8 @@ class DeepAgent:
         return action_seq_array
 
     def act(self, infoset):
+        # torch is only referenced on the non-ONNX paths below
+        torch = None if self.use_onnx else _require_torch()
         player_position = infoset.player_position
         num_legal_actions = len(infoset.legal_actions)
         my_handcards = self.cards2array(infoset.player_hand_cards)
