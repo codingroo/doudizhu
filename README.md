@@ -1,4 +1,4 @@
-# Offline Doudizhu (斗地主) derived from DouZero
+# Offline Doudizhu (斗地主) from DouZero project
 
 A fork of [RLCard Showdown](https://github.com/datamllab/rlcard-showdown), changed into a small **offline Doudizhu game against the DouZero AI** that runs on your own computer or server. It was made for fun, not for commercial use.
 
