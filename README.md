@@ -10,6 +10,8 @@ What is different from the original:
 - the AI runs with ONNX Runtime (PyTorch is not needed)
 - **settings you can edit without rebuilding:** `public/custom.css` (sizes and colours), `public/phrases.js` (the comments in the settlement window), `public/settings.js`, `public/hotkeys.js`. After a build they are in the `web` folder; change them there and a Ctrl+F5 reload to take effect.
 
+![Screenshot](docs/imgs/screenshot.png)
+
 ## Run it
 
 1. **Models (not included).** Get the DouZero pre-trained models (see the [DouZero](https://github.com/kwai/DouZero) project) and put them into `pve_server/pretrained/douzero_pretrained/` as `landlord.onnx`, `landlord_up.onnx` and `landlord_down.onnx`. (If you only have the `.ckpt` files, install PyTorch once; the server then exports the `.onnx` files itself.)
