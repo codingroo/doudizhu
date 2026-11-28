@@ -34,6 +34,7 @@ import { douzeroDemoUrl } from '../../utils/config';
 import { currentMultiplier, settle } from '../../utils/doudizhuScore';
 import { pickPhrase } from '../../utils/doudizhuPhrase';
 import { aiBid, applyBid, createBidState, landlordIdxToRole } from '../../utils/doudizhuBid';
+import { toggleFullscreen, unlockOrientation } from '../../utils/fullscreen';
 
 let shuffledDoudizhuDeck = [];
 let threeLandlordCards = [];
@@ -1098,19 +1099,20 @@ function PvEDoudizhuDemoView() {
             setViewWidth(window.innerWidth);
         };
         updateScale();
+        // also when the fullscreen is left in another way than with our button (the back key of the phone, say)
+        const onFullscreenChange = () => {
+            if (!document.fullscreenElement) unlockOrientation();
+        };
         window.addEventListener('resize', updateScale);
         document.addEventListener('fullscreenchange', updateScale);
+        document.addEventListener('fullscreenchange', onFullscreenChange);
         return () => {
             window.removeEventListener('resize', updateScale);
             document.removeEventListener('fullscreenchange', updateScale);
+            document.removeEventListener('fullscreenchange', onFullscreenChange);
             document.body.classList.remove('dz-fullscreen');
         };
     }, []);
-
-    const toggleFullscreen = () => {
-        if (document.fullscreenElement) document.exitFullscreen();
-        else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
-    };
 
     // start the next game (bidding) as soon as the table is ready, without clicking "开始游戏"
     useEffect(() => {

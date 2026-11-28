@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import logo_white from "../assets/images/logo_white.png";
 import AppBar from "@material-ui/core/AppBar";
 import Button from "@material-ui/core/Button";
+import { toggleFullscreen } from "../utils/fullscreen";
 
 function Navbar() {
     const { t } = useTranslation();
@@ -13,11 +14,6 @@ function Navbar() {
         document.addEventListener('fullscreenchange', update);
         return () => document.removeEventListener('fullscreenchange', update);
     }, []);
-
-    const toggleFullscreen = () => {
-        if (document.fullscreenElement) document.exitFullscreen();
-        else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
-    };
 
     return (
         <AppBar position="fixed" className={"header-bar-wrapper"}>
